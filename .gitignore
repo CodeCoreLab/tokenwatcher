@@ -1,0 +1,21 @@
+# 依赖与构建产物
+node_modules/
+dist/
+.build/
+
+# 第三方工具（NSIS 等），体积大且可重新下载
+.tools/
+
+# 打包输出
+*.exe
+*.zip
+*.msi
+
+# 运行时配置（含本机路径）
+TokenWatcher.ini
+
+# 日志与临时文件
+*.log
+*.bak
+.DS_Store
+Thumbs.db

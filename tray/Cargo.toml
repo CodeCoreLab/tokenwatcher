@@ -1,0 +1,18 @@
+[package]
+name = "tray"
+version = "0.1.0"
+edition = "2021"
+description = "TokenWatcher tray host (zero third-party deps)"
+
+[[bin]]
+name = "TokenWatcherTray"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1
