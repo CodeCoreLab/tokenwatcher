@@ -278,7 +278,15 @@ fn local_appdata() -> PathBuf {
 }
 
 fn log_path() -> PathBuf {
-    local_appdata().join("logs").join("serve.log")
+    // 按日切分：serve-YYYY-MM-DD.log。托盘拉起 serve 时按当天日期选文件，
+    // 跨天由下一次启动自然轮转；长驻期间仍写同一文件，可接受。
+    let (day, _) = local_day_stamp();
+    let name = if day.is_empty() {
+        "serve.log".to_string()
+    } else {
+        format!("serve-{day}.log")
+    };
+    local_appdata().join("logs").join(name)
 }
 
 fn data_dir() -> PathBuf {
@@ -288,16 +296,74 @@ fn data_dir() -> PathBuf {
         .join(".tokenmeter")
 }
 
-/// 轻量排障日志（托盘是 GUI 进程，没有 stdout，只能落文件）
+/// 轻量排障日志（托盘是 GUI 进程，没有 stdout，只能落文件）。
+///
+/// 每行带本地时间戳与级别前缀：`[YYYY-MM-DD HH:MM:SS] [INFO] msg`。
+/// 文件名按日切分（`tray-YYYY-MM-DD.log`）：写新文件即可轮转，无需清理线程，
+/// 旧文件按需手动删。时间取自系统时钟（零依赖，不引第三方 crate）。
 fn trace(msg: &str) {
-    let lp = local_appdata().join("logs").join("tray.log");
+    trace_level("INFO", msg);
+}
+
+/// 带级别的日志底层：`[YYYY-MM-DD HH:MM:SS] [LEVEL] msg`。
+fn trace_level(level: &str, msg: &str) {
+    let (day, stamp) = local_day_stamp();
+    // 时间不可得时回退到固定名、无前缀 —— 宁可少字段也不写成 `tray-.log`。
+    let (name, prefix) = if day.is_empty() {
+        ("tray.log".to_string(), String::new())
+    } else {
+        (format!("tray-{day}.log"), format!("[{stamp}] [{level}] "))
+    };
+    let lp = local_appdata().join("logs").join(name);
     if let Some(dir) = lp.parent() {
         let _ = create_dir_all(dir);
     }
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&lp) {
         use std::io::Write;
-        let _ = writeln!(f, "{}", msg);
+        let _ = writeln!(f, "{prefix}{msg}");
     }
+}
+
+/// (YYYY-MM-DD, HH:MM:SS) 取自本地系统时间。零依赖：用 DOS 日期 API 拿本地时间。
+/// 返回 ("", "") 表示时间不可得（极少见），此时日志仍写入固定名文件、无时间戳。
+fn local_day_stamp() -> (String, String) {
+    #[repr(C)]
+    struct SystemTime {
+        year: u16,
+        month: u16,
+        day_of_week: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        second: u16,
+        milliseconds: u16,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetLocalTime(t: *mut SystemTime);
+    }
+    let mut t = SystemTime {
+        year: 0,
+        month: 0,
+        day_of_week: 0,
+        day: 0,
+        hour: 0,
+        minute: 0,
+        second: 0,
+        milliseconds: 0,
+    };
+    // SAFETY: t 是正确尺寸的出参。
+    unsafe { GetLocalTime(&mut t) };
+    if t.year == 0 {
+        return (String::new(), String::new());
+    }
+    (
+        format!("{:04}-{:02}-{:02}", t.year, t.month, t.day),
+        format!(
+            "{:02}:{:02}:{:02}",
+            t.hour, t.minute, t.second
+        ),
+    )
 }
 
 /* ---------------------------------------------------------------- 配置文件 */
@@ -421,7 +487,7 @@ fn save_autostart_flag(v: bool) {
         out.push_str(&format!("autostart = {}\n", v));
     }
     if std::fs::write(&p, out).is_err() {
-        trace("config: 回写 autostart 失败（目录只读？）");
+        trace_level("ERROR", "config: 回写 autostart 失败（目录只读？）");
     }
 }
 
@@ -512,14 +578,17 @@ fn start_server() {
         Ok(child) => {
             with_state(|s| s.child = Some(child));
         }
-        Err(e) => unsafe {
-            MessageBoxW(
-                0,
-                wide(&format!("启动 TokenWatcher.exe 失败：{}", e)).as_ptr(),
-                wide("TokenWatcher").as_ptr(),
-                0x10,
-            );
-        },
+        Err(e) => {
+            trace_level("ERROR", &format!("启动 TokenWatcher.exe 失败：{e}"));
+            unsafe {
+                MessageBoxW(
+                    0,
+                    wide(&format!("启动 TokenWatcher.exe 失败：{}", e)).as_ptr(),
+                    wide("TokenWatcher").as_ptr(),
+                    0x10,
+                );
+            }
+        }
     }
 }
 

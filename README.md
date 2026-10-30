@@ -72,7 +72,7 @@ autostart = false
 | 打开面板 | 浏览器打开 `http://127.0.0.1:8788/`（服务没起会先静默拉起） |
 | 立即扫描一次 | 强制重新扫描所有数据源，不等 60 秒轮询 |
 | **开机自动启动** | 勾选即写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`（**免管理员**），再点取消 |
-| 打开日志 | 打开 `%LOCALAPPDATA%\TokenWatcher\logs\serve.log` |
+| 打开日志 | 打开 `%LOCALAPPDATA%\TokenWatcher\logs\serve-YYYY-MM-DD.log`（按日切分；托盘日志为 `tray-YYYY-MM-DD.log`，同样带时间戳与级别前缀） |
 | 打开数据目录 | 打开 `%USERPROFILE%\.tokenmeter`（统计数据库） |
 | 编辑配置 | 用记事本打开 `TokenWatcher.ini` |
 | 退出（停止服务） | 同时停掉后台服务进程，不留残余 |
