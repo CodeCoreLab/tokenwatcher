@@ -7,18 +7,18 @@
 
 ## [未发布]
 
+## [1.5.2] - 2026-11-06
 ### 修复
 
+- **`copy_to_buf` 长度恰好相等时不再丢最后一个字符**
 - `trace()` 写入格式为纯文本，无时间戳与级别，排障时无法判断先后与严重度 →
-  改为 `[YYYY-MM-DD HH:MM:SS] [LEVEL] msg`，`trace()` 保留为 INFO 快捷方式
 - `tray.log` / `serve.log` 单文件无限增长、无轮转 → 按日切分
-  `tray-YYYY-MM-DD.log` / `serve-YYYY-MM-DD.log`（写新文件即轮转，
-  无需清理线程）
 - 时间戳实现守住「零第三方依赖」承诺：直接调用 kernel32 `GetLocalTime`，
-  不引入任何 crate；时间不可得时回退固定文件名且不加前缀
 - 启动后端服务失败只弹 MessageBox、不落日志，事后无迹可查 →
-  弹窗之前先写 ERROR 日志
 
+### 安全
+
+- **构建脚本不再经 shell 调用 npm**：原用 `shell: true` 拼接命令，且资源路径硬编码 Windows 反斜杠；改为参数数组传参 + `path.join` 拼接
 ## [1.5.1] - 2026-10-26
 
 ### 新增
