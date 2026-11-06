@@ -8,7 +8,8 @@
 //! - `#![windows_subsystem = "windows"]` 让本进程无控制台窗口。
 //! - 主程序仍走 CREATE_NO_WINDOW + 输出重定向到日志文件，而不是改 PE subsystem，
 //!   这样 TokenWatcher.exe 保留 CLI 能力（`today` / `doctor` 等仍能看输出）。
-#![windows_subsystem = "windows"]
+// 测试构建时去掉 windows 子系统，否则 cargo test 的输出无处显示。
+#![cfg_attr(not(test), windows_subsystem = "windows")]
 
 use std::ffi::OsStr;
 use std::fs::{create_dir_all, File, OpenOptions};
@@ -250,11 +251,27 @@ fn wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
+/// 把 `src` 拷进定长 UTF-16 缓冲区 `dst`（Win32 的 `sz*` 字段）。
+///
+/// 容量按「字符（UTF-16 码元）数」计，不再为 NUL 终止符牺牲最后一个字符：
+/// - `src` 短于容量：全部拷入，并在其后一格写 NUL；
+/// - `src` 长度**恰好等于**容量：全部拷入（没有余量，不写 NUL）；
+/// - `src` 长于容量：按容量截断，并保留末格写 NUL，保证 Win32 能读到终止符。
+///
+/// 旧实现用 `wide()`（含尾部 NUL）算长度，`n == dst.len()` 时把最后一格清零，
+/// 于是「文本长度恰好等于缓冲区长度」时最后一个字符被吞掉（B17）。
 fn copy_to_buf(dst: &mut [u16], src: &str) {
-    let w = wide(src);
-    let n = w.len().min(dst.len());
-    dst[..n].copy_from_slice(&w[..n]);
-    if n == dst.len() {
+    if dst.is_empty() {
+        return;
+    }
+    let content: Vec<u16> = src.encode_utf16().collect();
+    let n = content.len().min(dst.len());
+    dst[..n].copy_from_slice(&content[..n]);
+    if content.len() < dst.len() {
+        // 有余量：补 NUL 终止符。
+        dst[n] = 0;
+    } else if content.len() > dst.len() {
+        // 超长：截断后必须留一格写 NUL，否则 Win32 侧读不到终止符。
         dst[n - 1] = 0;
     }
 }
@@ -1088,5 +1105,63 @@ fn main() {
         Shell_NotifyIconW(NIM_DELETE, &nid2);
         stop_server();
         CloseHandle(mutex);
+    }
+}
+
+/* ------------------------------------------------------------------ 单元测试 */
+
+#[cfg(test)]
+mod tests {
+    use super::copy_to_buf;
+
+    /// 取缓冲区里 NUL 之前的有效内容（模拟 Win32 侧读宽字符串）。
+    fn text_of(buf: &[u16]) -> String {
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        String::from_utf16_lossy(&buf[..end])
+    }
+
+    /// B17：文本长度恰好等于缓冲区长度时，最后一个字符不能被吞掉。
+    ///
+    /// 旧实现把「已写满」当成「需要补终止符」，把最后一格清零，
+    /// 于是长度恰好相等的字符串少最后一个字符。
+    #[test]
+    fn b17_copy_to_buf_exact_length_keeps_last_char() {
+        let mut buf = [0u16; 5];
+        copy_to_buf(&mut buf, "abcde");
+        assert_eq!(
+            buf,
+            [b'a' as u16, b'b' as u16, b'c' as u16, b'd' as u16, b'e' as u16],
+            "长度恰好相等时最后一个字符被吞掉了"
+        );
+        assert_eq!(text_of(&buf), "abcde");
+    }
+
+    /// 短于缓冲区：全部拷入，并以 NUL 收尾。
+    #[test]
+    fn b17_copy_to_buf_shorter_than_buf_is_nul_terminated() {
+        let mut buf = [0u16; 8];
+        copy_to_buf(&mut buf, "abc");
+        assert_eq!(&buf[..4], &[b'a' as u16, b'b' as u16, b'c' as u16, 0]);
+        assert_eq!(text_of(&buf), "abc");
+    }
+
+    /// 长于缓冲区：按容量截断，且保留末格写 NUL（Win32 需要终止符）。
+    #[test]
+    fn b17_copy_to_buf_longer_than_buf_truncates_and_terminates() {
+        let mut buf = [0u16; 5];
+        copy_to_buf(&mut buf, "abcdefgh");
+        assert_eq!(
+            &buf[..5],
+            &[b'a' as u16, b'b' as u16, b'c' as u16, b'd' as u16, 0]
+        );
+        assert_eq!(text_of(&buf), "abcd");
+    }
+
+    /// 非 BMP 字符按 UTF-16 码元计数（一个字符可能占 2 个码元）。
+    #[test]
+    fn b17_copy_to_buf_counts_utf16_code_units() {
+        let mut buf = [0u16; 4];
+        copy_to_buf(&mut buf, "中a");
+        assert_eq!(text_of(&buf), "中a");
     }
 }

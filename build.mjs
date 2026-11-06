@@ -27,6 +27,7 @@ import {
 } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { npmGlobalRoot, seaAssetPath } from './build-utils.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const BUILD = join(ROOT, '.build');
@@ -45,7 +46,8 @@ function findSource() {
     return p;
   }
   try {
-    const globalRoot = execFileSync('npm', ['root', '-g'], { encoding: 'utf8', shell: true }).trim();
+    // 免 shell：参数数组传参，不经 cmd.exe 解析（避免命令注入面）。
+    const globalRoot = npmGlobalRoot();
     const p = join(globalRoot, 'token-watcher');
     if (existsSync(join(p, 'package.json'))) return p;
   } catch { /* 落到抛错 */ }
@@ -163,7 +165,8 @@ function ensureRuntimeAssets() {
   }
   try {
     __twMkdir(__twDirname(zstdBin), { recursive: true });
-    __twWrite(zstdBin, Buffer.from(__twSea.getAsset('assets/bin/zstd.exe')), { mode: 0o755 });
+    // mode 只在 POSIX 有意义；Windows 上写 0o755 是无效位，去掉避免误导。
+    __twWrite(zstdBin, Buffer.from(__twSea.getAsset('assets/bin/zstd.exe')), process.platform === 'win32' ? undefined : { mode: 0o755 });
     process.env.TW_ZSTD_BIN = zstdBin;
   } catch { /* 未内嵌 zstd：dsh 源自动降级 */ }
   __twWrite(__twJoin(root, '.ready'), __TW_VERSION);
@@ -244,7 +247,8 @@ log(`  ✓ app.cjs ${(statSync(bundleOut).size / 1024).toFixed(0)} KB`);
 // 4. SEA blob（含 assets）
 log('[5/7] 生成 SEA blob');
 const seaAssets = {};
-for (const rel of webFiles) seaAssets[`assets/web/${rel}`] = join(ASSETS, 'web', rel.split('/').join('\\'));
+// SEA asset 的 key 必须是正斜杠（Node SEA 约定），本地路径按平台规则拼接。
+for (const rel of webFiles) seaAssets[`assets/web/${rel}`] = seaAssetPath(ASSETS, rel);
 if (zstdBundled) seaAssets['assets/bin/zstd.exe'] = join(ASSETS, 'bin', 'zstd.exe');
 
 const seaConfigPath = join(BUILD, 'sea-config.json');
