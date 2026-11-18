@@ -51,8 +51,6 @@ jobs:
       - name: 托盘宿主构建（release）
         working-directory: tray
         run: cargo build --release
-        env:
-          CARGO_TARGET_DIR: tray/target
 
       - name: 托盘产物校验
         run: |
