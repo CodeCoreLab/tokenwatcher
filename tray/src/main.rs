@@ -103,6 +103,7 @@ mod win_types {
         pub h_balloon_icon: HICON,
     }
 }
+#[cfg(windows)]
 use win_types::*;
 
 /* ------------------------------------------------------------------ 常量 */
