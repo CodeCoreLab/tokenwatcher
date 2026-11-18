@@ -1369,7 +1369,10 @@ mod linux_daemon {
 /* ------------------------------------------------------------------ 单元测试 */
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
+    // copy_to_buf 是 Win32 托盘专属（sz* 字段拷贝），Linux 构建无此函数
+    #[cfg(windows)]
     use super::copy_to_buf;
 
     /// 取缓冲区里 NUL 之前的有效内容（模拟 Win32 侧读宽字符串）。
@@ -1383,6 +1386,7 @@ mod tests {
     /// 旧实现把「已写满」当成「需要补终止符」，把最后一格清零，
     /// 于是长度恰好相等的字符串少最后一个字符。
     #[test]
+    #[cfg(windows)]
     fn b17_copy_to_buf_exact_length_keeps_last_char() {
         let mut buf = [0u16; 5];
         copy_to_buf(&mut buf, "abcde");
@@ -1396,6 +1400,7 @@ mod tests {
 
     /// 短于缓冲区：全部拷入，并以 NUL 收尾。
     #[test]
+    #[cfg(windows)]
     fn b17_copy_to_buf_shorter_than_buf_is_nul_terminated() {
         let mut buf = [0u16; 8];
         copy_to_buf(&mut buf, "abc");
@@ -1405,6 +1410,7 @@ mod tests {
 
     /// 长于缓冲区：按容量截断，且保留末格写 NUL（Win32 需要终止符）。
     #[test]
+    #[cfg(windows)]
     fn b17_copy_to_buf_longer_than_buf_truncates_and_terminates() {
         let mut buf = [0u16; 5];
         copy_to_buf(&mut buf, "abcdefgh");
@@ -1417,6 +1423,7 @@ mod tests {
 
     /// 非 BMP 字符按 UTF-16 码元计数（一个字符可能占 2 个码元）。
     #[test]
+    #[cfg(windows)]
     fn b17_copy_to_buf_counts_utf16_code_units() {
         let mut buf = [0u16; 4];
         copy_to_buf(&mut buf, "中a");
