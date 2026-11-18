@@ -32,7 +32,7 @@ import { npmGlobalRoot, seaAssetPath } from './build-utils.mjs';
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const BUILD = join(ROOT, '.build');
 const DIST = join(ROOT, 'dist');
-const EXE_NAME = 'TokenWatcher.exe';
+const EXE_NAME = process.platform === 'win32' ? 'TokenWatcher.exe' : 'token-watcher';
 const FUSE = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2';
 
 const log = (m) => console.log(m);
@@ -55,6 +55,11 @@ function findSource() {
 }
 
 function findZstd() {
+  // Linux（信创）: 常见系统路径 + PATH 探测；Windows: TW_ZSTD / 用户 bin
+  if (process.platform !== 'win32') {
+    const cands = [process.env.TW_ZSTD, '/usr/bin/zstd', '/bin/zstd', '/usr/local/bin/zstd'].filter(Boolean);
+    return cands.find((p) => existsSync(p)) || null;
+  }
   const cands = [
     process.env.TW_ZSTD,
     process.env.USERPROFILE ? join(process.env.USERPROFILE, '.workbuddy', 'bin', 'zstd.exe') : null,
@@ -132,7 +137,7 @@ copyFileSync(echartsPath, join(ASSETS, 'web', 'vendor', 'echarts.min.js'));
 let zstdBundled = false;
 if (ZSTD) {
   mkdirSync(join(ASSETS, 'bin'), { recursive: true });
-  copyFileSync(ZSTD, join(ASSETS, 'bin', 'zstd.exe'));
+  copyFileSync(ZSTD, join(ASSETS, 'bin', process.platform === 'win32' ? 'zstd.exe' : 'zstd'));
   zstdBundled = true;
 }
 const webFiles = walk(join(ASSETS, 'web'));
@@ -153,7 +158,7 @@ function ensureRuntimeAssets() {
   try { if (!__twSea.isSea()) return null; } catch { return null; }
   const base = process.env.LOCALAPPDATA || process.env.XDG_DATA_HOME || process.env.HOME || '.';
   const root = __twJoin(base, 'TokenWatcher', 'runtime', __TW_VERSION);
-  const zstdBin = __twJoin(root, 'bin', 'zstd.exe');
+  const zstdBin = __twJoin(root, 'bin', process.platform === 'win32' ? 'zstd.exe' : 'zstd');
   if (__twExists(__twJoin(root, '.ready'))) {
     if (__twExists(zstdBin)) process.env.TW_ZSTD_BIN = zstdBin;
     return root;
@@ -166,7 +171,7 @@ function ensureRuntimeAssets() {
   try {
     __twMkdir(__twDirname(zstdBin), { recursive: true });
     // mode 只在 POSIX 有意义；Windows 上写 0o755 是无效位，去掉避免误导。
-    __twWrite(zstdBin, Buffer.from(__twSea.getAsset('assets/bin/zstd.exe')), process.platform === 'win32' ? undefined : { mode: 0o755 });
+    __twWrite(zstdBin, Buffer.from(__twSea.getAsset('assets/bin/zstd')), process.platform === 'win32' ? undefined : { mode: 0o755 });
     process.env.TW_ZSTD_BIN = zstdBin;
   } catch { /* 未内嵌 zstd：dsh 源自动降级 */ }
   __twWrite(__twJoin(root, '.ready'), __TW_VERSION);
@@ -249,7 +254,7 @@ log('[5/7] 生成 SEA blob');
 const seaAssets = {};
 // SEA asset 的 key 必须是正斜杠（Node SEA 约定），本地路径按平台规则拼接。
 for (const rel of webFiles) seaAssets[`assets/web/${rel}`] = seaAssetPath(ASSETS, rel);
-if (zstdBundled) seaAssets['assets/bin/zstd.exe'] = join(ASSETS, 'bin', 'zstd.exe');
+if (zstdBundled) seaAssets['assets/bin/zstd'] = join(ASSETS, 'bin', process.platform === 'win32' ? 'zstd.exe' : 'zstd');
 
 const seaConfigPath = join(BUILD, 'sea-config.json');
 const blobPath = join(BUILD, 'sea.blob');
@@ -273,17 +278,20 @@ log('  ✓ 注入完成（原 Node 签名失效属正常，企业分发需自行
 // 6. 编译托盘宿主（Rust，零第三方依赖）
 log('[7/7] 编译托盘宿主');
 const trayDir = join(ROOT, 'tray');
-const trayBuilt = join(trayDir, 'target', 'release', 'TokenWatcherTray.exe');
+const trayBuilt = join(trayDir, 'target', 'release', process.platform === 'win32' ? 'TokenWatcherTray.exe' : 'TokenWatcherTray');
+const traySkip = process.platform !== 'win32'; // Linux 托盘由 CI 单独 cargo build（守护模式无 icon 依赖）
 let trayOk = false;
-if (existsSync(join(trayDir, 'Cargo.toml')) && existsSync(join(trayDir, 'icon.ico'))) {
+if (traySkip) {
+  log('  ! Linux 平台跳过托盘编译（CI 独立构建守护模式托盘）');
+} else if (existsSync(join(trayDir, 'Cargo.toml')) && existsSync(join(trayDir, 'icon.ico'))) {
   try {
     execFileSync('cargo', ['build', '--release', '--manifest-path', join(trayDir, 'Cargo.toml')], {
       stdio: 'inherit',
       cwd: trayDir,
     });
-    copyFileSync(trayBuilt, join(DIST, 'TokenWatcherTray.exe'));
+    copyFileSync(trayBuilt, join(DIST, process.platform === 'win32' ? 'TokenWatcherTray.exe' : 'TokenWatcherTray'));
     trayOk = true;
-    log('  ✓ TokenWatcherTray.exe');
+    log('  ✓ TokenWatcherTray');
   } catch (e) {
     log(`  ! 托盘编译失败，已跳过：${e.message.split('\n')[0]}`);
   }
@@ -294,7 +302,7 @@ if (existsSync(join(trayDir, 'Cargo.toml')) && existsSync(join(trayDir, 'icon.ic
 // 7. 报告
 const size = statSync(outExe).size;
 const sha = createHash('sha256').update(readFileSync(outExe)).digest('hex');
-const traySize = trayOk ? statSync(join(DIST, 'TokenWatcherTray.exe')).size : 0;
+const traySize = trayOk ? statSync(join(DIST, process.platform === 'win32' ? 'TokenWatcherTray.exe' : 'TokenWatcherTray')).size : 0;
 log(`\n=== 产物 ===`);
 log(`主程序  : ${outExe}`);
 log(`大小    : ${(size / 1048576).toFixed(1)} MB (${size} B)`);

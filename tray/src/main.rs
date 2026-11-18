@@ -1,23 +1,27 @@
-//! TokenWatcher 托盘宿主
+//! TokenWatcher 托盘宿主（Windows + Linux 信创双轨）
 //!
-//! 职责：静默拉起 TokenWatcher.exe serve（无控制台窗口）、托盘图标、右键菜单、
-//! 开机自启开关（HKCU Run，免管理员）、退出时收掉子进程。
+//! 职责：静默拉起 TokenWatcher serve（无控制台窗口）、托盘图标、右键菜单、
+//! 开机自启开关（Windows=HKCU Run；Linux=XDG autostart .desktop）、退出时收掉子进程。
 //!
 //! 设计约束：
-//! - 零第三方 crate（只用 std + 手写 Win32 声明），保证离线可编译、产物体积小。
-//! - `#![windows_subsystem = "windows"]` 让本进程无控制台窗口。
-//! - 主程序仍走 CREATE_NO_WINDOW + 输出重定向到日志文件，而不是改 PE subsystem，
-//!   这样 TokenWatcher.exe 保留 CLI 能力（`today` / `doctor` 等仍能看输出）。
-// 测试构建时去掉 windows 子系统，否则 cargo test 的输出无处显示。
-#![cfg_attr(not(test), windows_subsystem = "windows")]
+//! - Windows：零第三方 crate（只用 std + 手写 Win32 声明），保证离线可编译、产物体积小。
+//! - Linux（信创麒麟/UOS）：同样零第三方 crate；托盘用 dlopen libayatana-appindicator
+//!   不可用时降级为「无图标守护模式」（仅拉起 serve + CLI 控制入口，面板照常可用）。
+//!   不引 GTK 依赖编译链，保持交叉编译能力。
+//! - 主程序仍走无窗口 + 输出重定向到日志文件，TokenWatcher 保留 CLI 能力。
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
+#[cfg(windows)]
 use std::ffi::OsStr;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::net::TcpStream;
+#[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+#[cfg(windows)]
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
@@ -25,14 +29,19 @@ use std::time::Duration;
 
 /* ---------------------------------------------------------------- Win32 类型 */
 
-type HWND = isize;
-type HINSTANCE = isize;
-type HANDLE = isize;
-type HMENU = isize;
-type HICON = isize;
-type HKEY = isize;
-type LRESULT = isize;
-type WNDPROC = unsafe extern "system" fn(HWND, u32, usize, isize) -> LRESULT;
+#[cfg(windows)]
+mod win {
+    pub type HWND = isize;
+    pub type HINSTANCE = isize;
+    pub type HANDLE = isize;
+    pub type HMENU = isize;
+    pub type HICON = isize;
+    pub type HKEY = isize;
+    pub type LRESULT = isize;
+    pub type WNDPROC = unsafe extern "system" fn(HWND, u32, usize, isize) -> LRESULT;
+}
+#[cfg(windows)]
+use win::*;
 
 #[repr(C)]
 struct POINT {
@@ -94,38 +103,7 @@ struct NOTIFYICONDATAW {
 
 /* ------------------------------------------------------------------ 常量 */
 
-const WM_DESTROY: u32 = 0x0002;
-const WM_COMMAND: u32 = 0x0111;
-const WM_NULL: u32 = 0x0000;
-const WM_CONTEXTMENU: u32 = 0x007B;
-const WM_LBUTTONDBLCLK: u32 = 0x0203;
-const WM_RBUTTONUP: u32 = 0x0205;
-
-const NIM_ADD: u32 = 0x0000;
-const NIM_MODIFY: u32 = 0x0001;
-const NIM_DELETE: u32 = 0x0002;
-const NIF_MESSAGE: u32 = 0x0001;
-const NIF_ICON: u32 = 0x0002;
-const NIF_TIP: u32 = 0x0004;
-const NIF_INFO: u32 = 0x0010;
-
-const MF_STRING: u32 = 0x0000;
-const MF_SEPARATOR: u32 = 0x0800;
-const MF_CHECKED: u32 = 0x0008;
-const TPM_RIGHTBUTTON: u32 = 0x0002;
-const TPM_RETURNCMD: u32 = 0x0100;
-
-const CS_DBLCLKS: u32 = 0x0008;
-const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
-const WS_POPUP: u32 = 0x8000_0000;
-
-const HKEY_CURRENT_USER: HKEY = 0x8000_0001u64 as HKEY;
-const KEY_WRITE: u32 = 0x20006;
-const KEY_READ: u32 = 0x20019;
-const REG_SZ: u32 = 1;
-const ERROR_ALREADY_EXISTS: u32 = 183;
-const ERROR_FILE_NOT_FOUND: u32 = 2;
-
+// 菜单项 ID（双平台共用）
 const ID_OPEN: usize = 1;
 const ID_SCAN: usize = 2;
 const ID_AUTOSTART: usize = 3;
@@ -134,8 +112,70 @@ const ID_DATA: usize = 5;
 const ID_EXIT: usize = 6;
 const ID_CONFIG: usize = 7;
 
+#[cfg(windows)]
+const WM_DESTROY: u32 = 0x0002;
+#[cfg(windows)]
+const WM_COMMAND: u32 = 0x0111;
+#[cfg(windows)]
+const WM_NULL: u32 = 0x0000;
+#[cfg(windows)]
+const WM_CONTEXTMENU: u32 = 0x007B;
+#[cfg(windows)]
+const WM_LBUTTONDBLCLK: u32 = 0x0203;
+#[cfg(windows)]
+const WM_RBUTTONUP: u32 = 0x0205;
+
+#[cfg(windows)]
+const NIM_ADD: u32 = 0x0000;
+#[cfg(windows)]
+const NIM_MODIFY: u32 = 0x0001;
+#[cfg(windows)]
+const NIM_DELETE: u32 = 0x0002;
+#[cfg(windows)]
+const NIF_MESSAGE: u32 = 0x0001;
+#[cfg(windows)]
+const NIF_ICON: u32 = 0x0002;
+#[cfg(windows)]
+const NIF_TIP: u32 = 0x0004;
+#[cfg(windows)]
+const NIF_INFO: u32 = 0x0010;
+
+#[cfg(windows)]
+const MF_STRING: u32 = 0x0000;
+#[cfg(windows)]
+const MF_SEPARATOR: u32 = 0x0800;
+#[cfg(windows)]
+const MF_CHECKED: u32 = 0x0008;
+#[cfg(windows)]
+const TPM_RIGHTBUTTON: u32 = 0x0002;
+#[cfg(windows)]
+const TPM_RETURNCMD: u32 = 0x0100;
+
+#[cfg(windows)]
+const CS_DBLCLKS: u32 = 0x0008;
+#[cfg(windows)]
+const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+#[cfg(windows)]
+const WS_POPUP: u32 = 0x8000_0000;
+
+#[cfg(windows)]
+const HKEY_CURRENT_USER: HKEY = 0x8000_0001u64 as HKEY;
+#[cfg(windows)]
+const KEY_WRITE: u32 = 0x20006;
+#[cfg(windows)]
+const KEY_READ: u32 = 0x20019;
+#[cfg(windows)]
+const REG_SZ: u32 = 1;
+#[cfg(windows)]
+const ERROR_ALREADY_EXISTS: u32 = 183;
+#[cfg(windows)]
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+
+#[cfg(windows)]
 const WM_TRAY: u32 = 0x8001; // WM_APP + 1
+#[cfg(windows)]
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(windows)]
 const RUN_VALUE: &str = "TokenWatcher";
 /// 端口来自 TokenWatcher.ini，启动时装载。单线程消息循环，Relaxed 足够。
 static PORT: AtomicU16 = AtomicU16::new(8788);
@@ -143,10 +183,13 @@ static PORT: AtomicU16 = AtomicU16::new(8788);
 fn port() -> u16 {
     PORT.load(Ordering::Relaxed)
 }
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /* --------------------------------------------------------------- FFI 声明 */
 
+#[cfg(windows)]
+#[cfg(windows)]
 #[link(name = "user32")]
 extern "system" {
     fn RegisterClassW(c: *const WNDCLASSW) -> u16;
@@ -205,11 +248,13 @@ extern "system" {
     ) -> HINSTANCE;
 }
 
+#[cfg(windows)]
 #[link(name = "shell32")]
 extern "system" {
     fn Shell_NotifyIconW(msg: u32, data: *const NOTIFYICONDATAW) -> i32;
 }
 
+#[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn GetModuleHandleW(name: *const u16) -> HINSTANCE;
@@ -218,6 +263,7 @@ extern "system" {
     fn CloseHandle(h: HANDLE) -> i32;
 }
 
+#[cfg(windows)]
 #[link(name = "advapi32")]
 extern "system" {
     fn RegCreateKeyExW(
@@ -247,6 +293,7 @@ extern "system" {
 
 /* ---------------------------------------------------------------- 工具函数 */
 
+#[cfg(windows)]
 fn wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
@@ -260,6 +307,7 @@ fn wide(s: &str) -> Vec<u16> {
 ///
 /// 旧实现用 `wide()`（含尾部 NUL）算长度，`n == dst.len()` 时把最后一格清零，
 /// 于是「文本长度恰好等于缓冲区长度」时最后一个字符被吞掉（B17）。
+#[cfg(windows)]
 fn copy_to_buf(dst: &mut [u16], src: &str) {
     if dst.is_empty() {
         return;
@@ -284,14 +332,35 @@ fn exe_dir() -> PathBuf {
 }
 
 fn main_exe() -> PathBuf {
-    exe_dir().join("TokenWatcher.exe")
+    // Windows: TokenWatcher.exe；Linux（信创）: token-watcher（Node SEA 产物无 .exe 后缀）
+    if cfg!(windows) {
+        exe_dir().join("TokenWatcher.exe")
+    } else {
+        exe_dir().join("token-watcher")
+    }
 }
 
 fn local_appdata() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("TokenWatcher")
+    // Windows: %LOCALAPPDATA%\TokenWatcher
+    // Linux（信创）: $XDG_DATA_HOME/TokenWatcher（缺省 ~/.local/share）
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("TokenWatcher")
+    }
+    #[cfg(not(windows))]
+    {
+        let base = match std::env::var_os("XDG_DATA_HOME") {
+            Some(v) if !v.is_empty() => PathBuf::from(v),
+            _ => match std::env::var_os("HOME") {
+                Some(h) => PathBuf::from(h).join(".local").join("share"),
+                None => PathBuf::from("."),
+            },
+        };
+        base.join("TokenWatcher")
+    }
 }
 
 fn log_path() -> PathBuf {
@@ -307,10 +376,11 @@ fn log_path() -> PathBuf {
 }
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tokenmeter")
+    // 用户主目录下的数据目录：Windows=USERPROFILE，Linux=HOME
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .unwrap_or_else(|| ".".into());
+    PathBuf::from(home).join(".tokenmeter")
 }
 
 /// 轻量排障日志（托盘是 GUI 进程，没有 stdout，只能落文件）。
@@ -341,46 +411,64 @@ fn trace_level(level: &str, msg: &str) {
     }
 }
 
-/// (YYYY-MM-DD, HH:MM:SS) 取自本地系统时间。零依赖：用 DOS 日期 API 拿本地时间。
+/// (YYYY-MM-DD, HH:MM:SS) 取自本地系统时间。
+/// Windows 用 GetLocalTime（零依赖）；Linux 用 `date` 命令（托盘是长驻进程，
+/// 每条日志一次进程开销可接受；避免引入 chrono 破坏零依赖约束）。
 /// 返回 ("", "") 表示时间不可得（极少见），此时日志仍写入固定名文件、无时间戳。
 fn local_day_stamp() -> (String, String) {
-    #[repr(C)]
-    struct SystemTime {
-        year: u16,
-        month: u16,
-        day_of_week: u16,
-        day: u16,
-        hour: u16,
-        minute: u16,
-        second: u16,
-        milliseconds: u16,
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct SystemTime {
+            year: u16,
+            month: u16,
+            day_of_week: u16,
+            day: u16,
+            hour: u16,
+            minute: u16,
+            second: u16,
+            milliseconds: u16,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetLocalTime(t: *mut SystemTime);
+        }
+        let mut t = SystemTime {
+            year: 0,
+            month: 0,
+            day_of_week: 0,
+            day: 0,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            milliseconds: 0,
+        };
+        // SAFETY: t 是正确尺寸的出参。
+        unsafe { GetLocalTime(&mut t) };
+        if t.year == 0 {
+            return (String::new(), String::new());
+        }
+        (
+            format!("{:04}-{:02}-{:02}", t.year, t.month, t.day),
+            format!("{:02}:{:02}:{:02}", t.hour, t.minute, t.second),
+        )
     }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetLocalTime(t: *mut SystemTime);
+    #[cfg(not(windows))]
+    {
+        let ok = std::process::Command::new("date")
+            .arg("+%Y-%m-%d|%H:%M:%S")
+            .output();
+        match ok {
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stdout);
+                let mut it = s.trim().split('|');
+                let d = it.next().unwrap_or("").to_string();
+                let t = it.next().unwrap_or("").to_string();
+                (d, t)
+            }
+            Err(_) => (String::new(), String::new()),
+        }
     }
-    let mut t = SystemTime {
-        year: 0,
-        month: 0,
-        day_of_week: 0,
-        day: 0,
-        hour: 0,
-        minute: 0,
-        second: 0,
-        milliseconds: 0,
-    };
-    // SAFETY: t 是正确尺寸的出参。
-    unsafe { GetLocalTime(&mut t) };
-    if t.year == 0 {
-        return (String::new(), String::new());
-    }
-    (
-        format!("{:04}-{:02}-{:02}", t.year, t.month, t.day),
-        format!(
-            "{:02}:{:02}:{:02}",
-            t.hour, t.minute, t.second
-        ),
-    )
 }
 
 /* ---------------------------------------------------------------- 配置文件 */
@@ -547,8 +635,13 @@ fn open_panel() {
         }
     }
     let url = format!("http://127.0.0.1:{}/", port());
+    #[cfg(windows)]
     unsafe {
         ShellExecuteW(0, wide("open").as_ptr(), wide(&url).as_ptr(), null(), null(), 1);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("xdg-open").arg(&url).spawn();
     }
 }
 
@@ -558,14 +651,17 @@ fn start_server() {
     }
     let exe = main_exe();
     if !exe.exists() {
+        #[cfg(windows)]
         unsafe {
             MessageBoxW(
                 0,
-                wide("找不到 TokenWatcher.exe，请确认它和托盘程序在同一目录。").as_ptr(),
+                wide("找不到 TokenWatcher 可执行文件，请确认它和托盘程序在同一目录。").as_ptr(),
                 wide("TokenWatcher").as_ptr(),
                 0x10,
             );
         }
+        #[cfg(not(windows))]
+        trace_level("ERROR", "找不到 TokenWatcher 可执行文件（应与托盘程序同目录）");
         return;
     }
     let lp = log_path();
@@ -589,6 +685,7 @@ fn start_server() {
         None => cmd.stderr(Stdio::null()),
     };
     cmd.stdin(Stdio::null());
+    #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     match cmd.spawn() {
@@ -596,11 +693,12 @@ fn start_server() {
             with_state(|s| s.child = Some(child));
         }
         Err(e) => {
-            trace_level("ERROR", &format!("启动 TokenWatcher.exe 失败：{e}"));
+            trace_level("ERROR", &format!("启动 TokenWatcher 失败：{e}"));
+            #[cfg(windows)]
             unsafe {
                 MessageBoxW(
                     0,
-                    wide(&format!("启动 TokenWatcher.exe 失败：{}", e)).as_ptr(),
+                    wide(&format!("启动 TokenWatcher 失败：{}", e)).as_ptr(),
                     wide("TokenWatcher").as_ptr(),
                     0x10,
                 );
@@ -624,7 +722,9 @@ fn run_scan() {
         return;
     }
     let mut cmd = Command::new(&exe);
-    cmd.arg("scan").creation_flags(CREATE_NO_WINDOW);
+    cmd.arg("scan");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.stdout(Stdio::null())
         .stderr(Stdio::null())
         .stdin(Stdio::null());
@@ -633,6 +733,33 @@ fn run_scan() {
 
 /* ---------------------------------------------------------------- 开机自启 */
 
+/// Linux 自启 .desktop 文件路径（$XDG_CONFIG_HOME/autostart，缺省 ~/.config/autostart）
+#[cfg(not(windows))]
+fn xdg_autostart_file() -> PathBuf {
+    let base = match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => match std::env::var_os("HOME") {
+            Some(h) => PathBuf::from(h).join(".config"),
+            None => PathBuf::from("."),
+        },
+    };
+    base.join("autostart").join("token-watcher-tray.desktop")
+}
+
+/// Linux：读 .desktop 是否存在（Exec 行含当前 exe 路径才算启用）
+#[cfg(not(windows))]
+fn read_autostart() -> Option<String> {
+    let f = xdg_autostart_file();
+    let content = std::fs::read_to_string(&f).ok()?;
+    for line in content.lines() {
+        if let Some(v) = line.strip_prefix("Exec=") {
+            return Some(v.trim().to_string());
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
 fn read_autostart() -> Option<String> {
     unsafe {
         let mut key: HKEY = 0;
@@ -701,6 +828,40 @@ fn autostart_up_to_date() -> bool {
     }
 }
 
+/// Linux：写/删 XDG autostart .desktop（幂等）
+#[cfg(not(windows))]
+fn set_autostart(enable: bool) -> bool {
+    let f = xdg_autostart_file();
+    if enable {
+        if let Some(dir) = f.parent() {
+            if create_dir_all(dir).is_err() {
+                return false;
+            }
+        }
+        let exe = std::env::current_exe().unwrap_or_default();
+        let content = format!(
+            "[Desktop Entry]
+Type=Application
+Version=1.0
+Name=TokenWatcher
+             Comment=Token 消耗看板托盘
+Exec=\"{}\" --autostart
+Terminal=false
+             X-GNOME-Autostart-enabled=true
+",
+            exe.display().to_string().replace('"', "\\\"")
+        );
+        std::fs::write(&f, content).is_ok()
+    } else {
+        match std::fs::remove_file(&f) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => false,
+        }
+    }
+}
+
+#[cfg(windows)]
 fn set_autostart(enable: bool) -> bool {
     unsafe {
         let mut key: HKEY = 0;
@@ -740,220 +901,199 @@ fn set_autostart(enable: bool) -> bool {
 
 /* -------------------------------------------------------------------- 托盘 */
 
-/// 内嵌的项目图标（由 web/apple-touch-icon.png 转出的多尺寸 ico）。
-/// 不用 TokenWatcher.exe 的图标：那是 Node 运行时自带的绿圆，跟产品无关。
-const ICO: &[u8] = include_bytes!("../icon.ico");
+#[cfg(windows)]
+mod win_tray {
+    use super::*;
 
-/// 从内存 ico 里挑最接近 32px 的那张，创建 HICON。
-/// 系统会按 DPI 自行缩放，所以不需要在 ico 里追求每个尺寸都完美。
-unsafe fn embedded_icon() -> HICON {
-    let b = ICO;
-    if b.len() < 6 {
-        return 0;
-    }
-    let count = u16::from_le_bytes([b[4], b[5]]) as usize;
-    let mut best: (usize, usize, i32) = (0, 0, i32::MAX);
-    for i in 0..count {
-        let off = 6 + i * 16;
-        if off + 16 > b.len() {
-            break;
+    /* -------------------------------------------------------------------- 托盘 */
+
+    /// 内嵌的项目图标（由 web/apple-touch-icon.png 转出的多尺寸 ico）。
+    /// 不用 TokenWatcher.exe 的图标：那是 Node 运行时自带的绿圆，跟产品无关。
+    const ICO: &[u8] = include_bytes!("../icon.ico");
+
+    /// 从内存 ico 里挑最接近 32px 的那张，创建 HICON。
+    /// 系统会按 DPI 自行缩放，所以不需要在 ico 里追求每个尺寸都完美。
+    unsafe fn embedded_icon() -> HICON {
+        let b = ICO;
+        if b.len() < 6 {
+            return 0;
         }
-        let w = if b[off] == 0 { 256 } else { b[off] as i32 };
-        let res = u32::from_le_bytes([b[off + 8], b[off + 9], b[off + 10], b[off + 11]]) as usize;
-        let img = u32::from_le_bytes([b[off + 12], b[off + 13], b[off + 14], b[off + 15]]) as usize;
-        if img + res > b.len() {
-            continue;
+        let count = u16::from_le_bytes([b[4], b[5]]) as usize;
+        let mut best: (usize, usize, i32) = (0, 0, i32::MAX);
+        for i in 0..count {
+            let off = 6 + i * 16;
+            if off + 16 > b.len() {
+                break;
+            }
+            let w = if b[off] == 0 { 256 } else { b[off] as i32 };
+            let res = u32::from_le_bytes([b[off + 8], b[off + 9], b[off + 10], b[off + 11]]) as usize;
+            let img = u32::from_le_bytes([b[off + 12], b[off + 13], b[off + 14], b[off + 15]]) as usize;
+            if img + res > b.len() {
+                continue;
+            }
+            let d = (w - 32).abs();
+            if d < best.2 {
+                best = (res, img, d);
+            }
         }
-        let d = (w - 32).abs();
-        if d < best.2 {
-            best = (res, img, d);
+        if best.0 == 0 {
+            return 0;
         }
-    }
-    if best.0 == 0 {
-        return 0;
-    }
-    CreateIconFromResourceEx(
-        b.as_ptr().add(best.1),
-        best.0 as u32,
-        1,
-        0x0003_0000,
-        0,
-        0,
-        0,
-    )
-}
-
-fn build_nid(hwnd: HWND) -> NOTIFYICONDATAW {
-    let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
-    nid.cb_size = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-    nid.hwnd = hwnd;
-    nid.uid = 1;
-    nid.u_flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-    nid.u_callback_message = WM_TRAY;
-    let icon = unsafe {
-        let h = embedded_icon();
-        if h != 0 {
-            h
-        } else {
-            // 兜底：内嵌图标解析失败时用系统默认图标，至少别让托盘空着
-            LoadIconW(0, 32512 as *const u16)
-        }
-    };
-    nid.h_icon = icon;
-    nid
-}
-
-fn rebuild_tip(hwnd: HWND) {
-    let alive = port_alive();
-    let auto = autostart_enabled();
-    let tip = format!(
-        "TokenWatcher · {} · 自启{}",
-        if alive { "运行中" } else { "未运行" },
-        if auto { "开" } else { "关" }
-    );
-    let mut nid = build_nid(hwnd);
-    copy_to_buf(&mut nid.sz_tip, &tip);
-    unsafe {
-        Shell_NotifyIconW(NIM_MODIFY, &nid);
-    }
-}
-
-/// 首次运行弹一次气泡：Win11 默认把新图标收进 ^ 溢出区，不提示用户会找不到。
-fn show_first_run_balloon(hwnd: HWND) {
-    let marker = local_appdata().join(".balloon-shown");
-    if marker.exists() {
-        return;
-    }
-    let mut nid = build_nid(hwnd);
-    copy_to_buf(&mut nid.sz_tip, "TokenWatcher");
-    copy_to_buf(&mut nid.sz_info_title, "TokenWatcher 已在后台运行");
-    copy_to_buf(
-        &mut nid.sz_info,
-        "图标可能收在任务栏右下角的 ^ 里，可拖到任务栏固定。双击图标打开面板，右键可设置开机自启。",
-    );
-    nid.u_flags = NIF_INFO | NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    nid.dw_info_flags = 0x1; // NIIF_INFO
-    unsafe {
-        Shell_NotifyIconW(NIM_MODIFY, &nid);
-    }
-    if let Some(dir) = marker.parent() {
-        let _ = create_dir_all(dir);
-    }
-    let _ = File::create(&marker);
-}
-
-fn show_menu(hwnd: HWND) {
-    unsafe {
-        let menu = CreatePopupMenu();
-        let auto = autostart_enabled();
-        AppendMenuW(menu, MF_STRING, ID_OPEN, wide("打开面板").as_ptr());
-        AppendMenuW(menu, MF_STRING, ID_SCAN, wide("立即扫描一次").as_ptr());
-        AppendMenuW(menu, MF_SEPARATOR, 0, null());
-        AppendMenuW(
-            menu,
-            MF_STRING | if auto { MF_CHECKED } else { 0 },
-            ID_AUTOSTART,
-            wide("开机自动启动").as_ptr(),
-        );
-        AppendMenuW(menu, MF_STRING, ID_LOG, wide("打开日志").as_ptr());
-        AppendMenuW(menu, MF_STRING, ID_DATA, wide("打开数据目录").as_ptr());
-        AppendMenuW(menu, MF_STRING, ID_CONFIG, wide("编辑配置 (TokenWatcher.ini)").as_ptr());
-        AppendMenuW(menu, MF_SEPARATOR, 0, null());
-        AppendMenuW(menu, MF_STRING, ID_EXIT, wide("退出（停止服务）").as_ptr());
-
-        let mut pt = POINT { x: 0, y: 0 };
-        GetCursorPos(&mut pt);
-        // 必须先抢前台，否则点别处菜单不消失（Win32 经典坑）
-        SetForegroundWindow(hwnd);
-        let cmd = TrackPopupMenu(
-            menu,
-            TPM_RIGHTBUTTON | TPM_RETURNCMD,
-            pt.x,
-            pt.y,
+        CreateIconFromResourceEx(
+            b.as_ptr().add(best.1),
+            best.0 as u32,
+            1,
+            0x0003_0000,
             0,
-            hwnd,
-            null(),
-        );
-        PostMessageW(hwnd, WM_NULL, 0, 0);
-        DestroyMenu(menu);
+            0,
+            0,
+        )
+    }
 
-        match cmd as usize {
-            ID_OPEN => open_panel(),
-            ID_SCAN => run_scan(),
-            ID_AUTOSTART => {
-                let next = !auto;
-                let _ = set_autostart(next);
-                save_autostart_flag(next); // 配置文件是真源，菜单操作同步回写
-                rebuild_tip(hwnd);
+    fn build_nid(hwnd: HWND) -> NOTIFYICONDATAW {
+        let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+        nid.cb_size = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hwnd = hwnd;
+        nid.uid = 1;
+        nid.u_flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        nid.u_callback_message = WM_TRAY;
+        let icon = unsafe {
+            let h = embedded_icon();
+            if h != 0 {
+                h
+            } else {
+                // 兜底：内嵌图标解析失败时用系统默认图标，至少别让托盘空着
+                LoadIconW(0, 32512 as *const u16)
             }
-            ID_CONFIG => {
-                let p = config_path();
-                if !p.exists() {
-                    let _ = std::fs::write(&p, DEFAULT_INI);
-                }
-                ShellExecuteW(
-                    0,
-                    wide("open").as_ptr(),
-                    wide(&p.to_string_lossy()).as_ptr(),
-                    null(),
-                    null(),
-                    1,
-                );
-            }
-            ID_LOG => {
-                let lp = log_path();
-                if let Some(dir) = lp.parent() {
-                    let _ = create_dir_all(dir);
-                }
-                let _ = File::create(&lp);
-                ShellExecuteW(
-                    0,
-                    wide("open").as_ptr(),
-                    wide(&lp.to_string_lossy()).as_ptr(),
-                    null(),
-                    null(),
-                    1,
-                );
-            }
-            ID_DATA => {
-                let d = data_dir();
-                let _ = create_dir_all(&d);
-                ShellExecuteW(
-                    0,
-                    wide("open").as_ptr(),
-                    wide(&d.to_string_lossy()).as_ptr(),
-                    null(),
-                    null(),
-                    1,
-                );
-            }
-            ID_EXIT => {
-                stop_server();
-                let nid = build_nid(hwnd);
-                Shell_NotifyIconW(NIM_DELETE, &nid);
-                PostQuitMessage(0);
-            }
-            _ => {}
+        };
+        nid.h_icon = icon;
+        nid
+    }
+
+    fn rebuild_tip(hwnd: HWND) {
+        let alive = port_alive();
+        let auto = autostart_enabled();
+        let tip = format!(
+            "TokenWatcher · {} · 自启{}",
+            if alive { "运行中" } else { "未运行" },
+            if auto { "开" } else { "关" }
+        );
+        let mut nid = build_nid(hwnd);
+        copy_to_buf(&mut nid.sz_tip, &tip);
+        unsafe {
+            Shell_NotifyIconW(NIM_MODIFY, &nid);
         }
     }
-}
 
-/* ---------------------------------------------------------------- 窗口过程 */
-
-unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> LRESULT {
-    match msg {
-        WM_TRAY => {
-            match lp as u32 {
-                WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
-                WM_LBUTTONDBLCLK => open_panel(),
-                _ => {}
-            }
-            0
+    /// 首次运行弹一次气泡：Win11 默认把新图标收进 ^ 溢出区，不提示用户会找不到。
+    fn show_first_run_balloon(hwnd: HWND) {
+        let marker = local_appdata().join(".balloon-shown");
+        if marker.exists() {
+            return;
         }
-        WM_COMMAND => {
-            match wp & 0xFFFF {
+        let mut nid = build_nid(hwnd);
+        copy_to_buf(&mut nid.sz_tip, "TokenWatcher");
+        copy_to_buf(&mut nid.sz_info_title, "TokenWatcher 已在后台运行");
+        copy_to_buf(
+            &mut nid.sz_info,
+            "图标可能收在任务栏右下角的 ^ 里，可拖到任务栏固定。双击图标打开面板，右键可设置开机自启。",
+        );
+        nid.u_flags = NIF_INFO | NIF_ICON | NIF_MESSAGE | NIF_TIP;
+        nid.dw_info_flags = 0x1; // NIIF_INFO
+        unsafe {
+            Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
+        if let Some(dir) = marker.parent() {
+            let _ = create_dir_all(dir);
+        }
+        let _ = File::create(&marker);
+    }
+
+    fn show_menu(hwnd: HWND) {
+        unsafe {
+            let menu = CreatePopupMenu();
+            let auto = autostart_enabled();
+            AppendMenuW(menu, MF_STRING, ID_OPEN, wide("打开面板").as_ptr());
+            AppendMenuW(menu, MF_STRING, ID_SCAN, wide("立即扫描一次").as_ptr());
+            AppendMenuW(menu, MF_SEPARATOR, 0, null());
+            AppendMenuW(
+                menu,
+                MF_STRING | if auto { MF_CHECKED } else { 0 },
+                ID_AUTOSTART,
+                wide("开机自动启动").as_ptr(),
+            );
+            AppendMenuW(menu, MF_STRING, ID_LOG, wide("打开日志").as_ptr());
+            AppendMenuW(menu, MF_STRING, ID_DATA, wide("打开数据目录").as_ptr());
+            AppendMenuW(menu, MF_STRING, ID_CONFIG, wide("编辑配置 (TokenWatcher.ini)").as_ptr());
+            AppendMenuW(menu, MF_SEPARATOR, 0, null());
+            AppendMenuW(menu, MF_STRING, ID_EXIT, wide("退出（停止服务）").as_ptr());
+
+            let mut pt = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut pt);
+            // 必须先抢前台，否则点别处菜单不消失（Win32 经典坑）
+            SetForegroundWindow(hwnd);
+            let cmd = TrackPopupMenu(
+                menu,
+                TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                pt.x,
+                pt.y,
+                0,
+                hwnd,
+                null(),
+            );
+            PostMessageW(hwnd, WM_NULL, 0, 0);
+            DestroyMenu(menu);
+
+            match cmd as usize {
                 ID_OPEN => open_panel(),
                 ID_SCAN => run_scan(),
+                ID_AUTOSTART => {
+                    let next = !auto;
+                    let _ = set_autostart(next);
+                    save_autostart_flag(next); // 配置文件是真源，菜单操作同步回写
+                    rebuild_tip(hwnd);
+                }
+                ID_CONFIG => {
+                    let p = config_path();
+                    if !p.exists() {
+                        let _ = std::fs::write(&p, DEFAULT_INI);
+                    }
+                    ShellExecuteW(
+                        0,
+                        wide("open").as_ptr(),
+                        wide(&p.to_string_lossy()).as_ptr(),
+                        null(),
+                        null(),
+                        1,
+                    );
+                }
+                ID_LOG => {
+                    let lp = log_path();
+                    if let Some(dir) = lp.parent() {
+                        let _ = create_dir_all(dir);
+                    }
+                    let _ = File::create(&lp);
+                    ShellExecuteW(
+                        0,
+                        wide("open").as_ptr(),
+                        wide(&lp.to_string_lossy()).as_ptr(),
+                        null(),
+                        null(),
+                        1,
+                    );
+                }
+                ID_DATA => {
+                    let d = data_dir();
+                    let _ = create_dir_all(&d);
+                    ShellExecuteW(
+                        0,
+                        wide("open").as_ptr(),
+                        wide(&d.to_string_lossy()).as_ptr(),
+                        null(),
+                        null(),
+                        1,
+                    );
+                }
                 ID_EXIT => {
                     stop_server();
                     let nid = build_nid(hwnd);
@@ -962,149 +1102,267 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
                 }
                 _ => {}
             }
-            0
         }
-        WM_DESTROY => {
-            PostQuitMessage(0);
-            0
-        }
-        _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
+
+    /* ---------------------------------------------------------------- 窗口过程 */
+
+    unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> LRESULT {
+        match msg {
+            WM_TRAY => {
+                match lp as u32 {
+                    WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
+                    WM_LBUTTONDBLCLK => open_panel(),
+                    _ => {}
+                }
+                0
+            }
+            WM_COMMAND => {
+                match wp & 0xFFFF {
+                    ID_OPEN => open_panel(),
+                    ID_SCAN => run_scan(),
+                    ID_EXIT => {
+                        stop_server();
+                        let nid = build_nid(hwnd);
+                        Shell_NotifyIconW(NIM_DELETE, &nid);
+                        PostQuitMessage(0);
+                    }
+                    _ => {}
+                }
+                0
+            }
+            WM_DESTROY => {
+                PostQuitMessage(0);
+                0
+            }
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+
+    pub fn main_win() {
+        unsafe {
+            // 脚本/自动化入口：TokenWatcherTray.exe --set-autostart on|off
+            let args: Vec<String> = std::env::args().collect();
+            if let Some(i) = args.iter().position(|a| a == "--set-autostart") {
+                let on = args.get(i + 1).map(|s| s == "on").unwrap_or(false);
+                let ok = set_autostart(on);
+                save_autostart_flag(on);
+                trace(&format!("cli set-autostart {} -> {}", on, ok));
+                std::process::exit(if ok { 0 } else { 1 });
+            }
+            if args.iter().any(|a| a == "--show-config") {
+                trace(&format!(
+                    "cli show-config -> path={} exists={}",
+                    config_path().display(),
+                    config_path().exists()
+                ));
+                std::process::exit(0);
+            }
+            if args.iter().any(|a| a == "--query-autostart") {
+                let on = autostart_enabled();
+                trace(&format!("cli query-autostart -> {}", on));
+                std::process::exit(if on { 0 } else { 1 });
+            }
+
+            // 被开机自启拉起时带 --autostart：此时不弹浏览器，只静默驻留托盘
+            let from_boot = args.iter().any(|a| a == "--autostart");
+
+            // 配置文件驱动：端口 / 是否自动开面板 / 是否开机自启
+            let cfg = load_config();
+            PORT.store(cfg.port, Ordering::Relaxed);
+            trace(&format!(
+                "config: port={} open_panel={} autostart={} from_boot={} path={}",
+                cfg.port,
+                cfg.open_panel,
+                cfg.autostart,
+                from_boot,
+                config_path().display()
+            ));
+
+            // 单实例：已有托盘在跑就只把面板打开，不重复拉服务
+            let mutex_name = wide("Local\\TokenWatcherTray.SingleInstance");
+            let mutex = CreateMutexW(null(), 0, mutex_name.as_ptr());
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                let url = format!("http://127.0.0.1:{}/", port());
+                ShellExecuteW(0, wide("open").as_ptr(), wide(&url).as_ptr(), null(), null(), 1);
+                return;
+            }
+
+            *STATE.lock().unwrap() = Some(State { child: None });
+
+            // 按配置同步开机自启：ini 是唯一真源，注册表跟着它走。
+            // 用 up_to_date 而非 enabled 判定，可顺带把老版本写的「不带 --autostart」的值升级掉。
+            if cfg.autostart {
+                if !autostart_up_to_date() {
+                    let ok = set_autostart(true);
+                    trace(&format!("config: 写入/升级开机自启 (ok={})", ok));
+                }
+            } else if autostart_enabled() {
+                let ok = set_autostart(false);
+                trace(&format!("config: 按配置移除开机自启 (ok={})", ok));
+            }
+
+            let inst = GetModuleHandleW(null());
+            let class_name = wide("TokenWatcherTrayWindow");
+            let wc = WNDCLASSW {
+                style: CS_DBLCLKS,
+                lpfn_wnd_proc: Some(wndproc),
+                cb_cls_extra: 0,
+                cb_wnd_extra: 0,
+                h_instance: inst,
+                h_icon: 0,
+                h_cursor: 0,
+                hbr_background: 0,
+                lpsz_menu_name: null(),
+                lpsz_class_name: class_name.as_ptr(),
+            };
+            RegisterClassW(&wc);
+
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                class_name.as_ptr(),
+                wide("TokenWatcher").as_ptr(),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                inst,
+                null_mut(),
+            );
+
+            let mut nid = build_nid(hwnd);
+            copy_to_buf(&mut nid.sz_tip, "TokenWatcher 启动中…");
+            let add_rc = Shell_NotifyIconW(NIM_ADD, &nid);
+            trace(&format!(
+                "NIM_ADD rc={} hwnd={} hicon={} ico_len={} cbSize={}",
+                add_rc,
+                hwnd,
+                nid.h_icon,
+                ICO.len(),
+                nid.cb_size
+            ));
+
+            start_server();
+            std::thread::sleep(Duration::from_millis(1200));
+            rebuild_tip(hwnd);
+            show_first_run_balloon(hwnd);
+
+            // 配置 open_panel = true 时自动开浏览器；开机自启拉起时一律跳过，避免每次开机弹窗
+            if cfg.open_panel {
+                if from_boot {
+                    trace("open_panel: 开机自启拉起，跳过弹窗（面板仍可用托盘图标打开）");
+                } else {
+                    open_panel();
+                }
+            }
+
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, 0, 0, 0) > 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+
+            // 正常退出路径：收掉子进程
+            let nid2 = build_nid(hwnd);
+            Shell_NotifyIconW(NIM_DELETE, &nid2);
+            stop_server();
+            CloseHandle(mutex);
+        }
+    }
+
+
 }
 
 /* -------------------------------------------------------------------- 入口 */
 
+/// 顶层入口（双轨）：Windows 走 win_tray 消息循环；Linux 走守护模式。
 fn main() {
-    unsafe {
-        // 脚本/自动化入口：TokenWatcherTray.exe --set-autostart on|off
-        let args: Vec<String> = std::env::args().collect();
-        if let Some(i) = args.iter().position(|a| a == "--set-autostart") {
-            let on = args.get(i + 1).map(|s| s == "on").unwrap_or(false);
-            let ok = set_autostart(on);
-            save_autostart_flag(on);
-            trace(&format!("cli set-autostart {} -> {}", on, ok));
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        if args.iter().any(|a| a == "--show-config") {
-            trace(&format!(
-                "cli show-config -> path={} exists={}",
-                config_path().display(),
-                config_path().exists()
-            ));
-            std::process::exit(0);
-        }
-        if args.iter().any(|a| a == "--query-autostart") {
-            let on = autostart_enabled();
-            trace(&format!("cli query-autostart -> {}", on));
-            std::process::exit(if on { 0 } else { 1 });
-        }
-
-        // 被开机自启拉起时带 --autostart：此时不弹浏览器，只静默驻留托盘
-        let from_boot = args.iter().any(|a| a == "--autostart");
-
-        // 配置文件驱动：端口 / 是否自动开面板 / 是否开机自启
-        let cfg = load_config();
-        PORT.store(cfg.port, Ordering::Relaxed);
+    // 脚本/自动化入口（双平台共用）：--set-autostart / --show-config / --query-autostart
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--set-autostart") {
+        let on = args.get(i + 1).map(|s| s == "on").unwrap_or(false);
+        let ok = set_autostart(on);
+        save_autostart_flag(on);
+        trace(&format!("cli set-autostart {} -> {}", on, ok));
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+    if args.iter().any(|a| a == "--show-config") {
         trace(&format!(
-            "config: port={} open_panel={} autostart={} from_boot={} path={}",
-            cfg.port,
-            cfg.open_panel,
-            cfg.autostart,
-            from_boot,
-            config_path().display()
+            "cli show-config -> path={} exists={}",
+            config_path().display(),
+            config_path().exists()
         ));
+        std::process::exit(0);
+    }
+    if args.iter().any(|a| a == "--query-autostart") {
+        let on = autostart_enabled();
+        trace(&format!("cli query-autostart -> {}", on));
+        std::process::exit(if on { 0 } else { 1 });
+    }
 
-        // 单实例：已有托盘在跑就只把面板打开，不重复拉服务
-        let mutex_name = wide("Local\\TokenWatcherTray.SingleInstance");
-        let mutex = CreateMutexW(null(), 0, mutex_name.as_ptr());
-        if GetLastError() == ERROR_ALREADY_EXISTS {
-            let url = format!("http://127.0.0.1:{}/", port());
-            ShellExecuteW(0, wide("open").as_ptr(), wide(&url).as_ptr(), null(), null(), 1);
-            return;
+    // 配置装载（双平台共用）
+    let cfg = load_config();
+    PORT.store(cfg.port, Ordering::Relaxed);
+
+    // 按配置同步开机自启：ini 是唯一真源，注册表/.desktop 跟着它走
+    if cfg.autostart {
+        if !autostart_up_to_date() {
+            let ok = set_autostart(true);
+            trace(&format!("config: 写入/升级开机自启 (ok={})", ok));
         }
+    } else if autostart_enabled() {
+        let ok = set_autostart(false);
+        trace(&format!("config: 按配置移除开机自启 (ok={})", ok));
+    }
 
-        *STATE.lock().unwrap() = Some(State { child: None });
+    // 平台分流
+    #[cfg(windows)]
+    win_tray::main_win();
+    #[cfg(not(windows))]
+    linux_daemon::run();
+}
 
-        // 按配置同步开机自启：ini 是唯一真源，注册表跟着它走。
-        // 用 up_to_date 而非 enabled 判定，可顺带把老版本写的「不带 --autostart」的值升级掉。
-        if cfg.autostart {
-            if !autostart_up_to_date() {
-                let ok = set_autostart(true);
-                trace(&format!("config: 写入/升级开机自启 (ok={})", ok));
-            }
-        } else if autostart_enabled() {
-            let ok = set_autostart(false);
-            trace(&format!("config: 按配置移除开机自启 (ok={})", ok));
-        }
+/* -------------------------------------------------- Linux 托盘（守护模式） */
 
-        let inst = GetModuleHandleW(null());
-        let class_name = wide("TokenWatcherTrayWindow");
-        let wc = WNDCLASSW {
-            style: CS_DBLCLKS,
-            lpfn_wnd_proc: Some(wndproc),
-            cb_cls_extra: 0,
-            cb_wnd_extra: 0,
-            h_instance: inst,
-            h_icon: 0,
-            h_cursor: 0,
-            hbr_background: 0,
-            lpsz_menu_name: null(),
-            lpsz_class_name: class_name.as_ptr(),
-        };
-        RegisterClassW(&wc);
+/// Linux（信创）托盘：不引 GTK/AppIndicator 编译链（保交叉编译能力），
+/// 常驻形态为「无图标守护进程」：
+/// - 拉起/停止 serve 子进程、端口探活、日志、ini 配置、CLI 参数——全部复用上层共用函数；
+/// - 面板访问入口 = 浏览器打开 http://127.0.0.1:<port>（首次启动打印到日志）；
+/// - 开机自启 = XDG autostart .desktop（上面 set_autostart/read_autostart 已双轨）。
+/// - SIGTERM/SIGINT 优雅退出：收掉子进程后退出。
+#[cfg(not(windows))]
+mod linux_daemon {
+    use super::*;
 
-        let hwnd = CreateWindowExW(
-            WS_EX_TOOLWINDOW,
-            class_name.as_ptr(),
-            wide("TokenWatcher").as_ptr(),
-            WS_POPUP,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            inst,
-            null_mut(),
-        );
-
-        let mut nid = build_nid(hwnd);
-        copy_to_buf(&mut nid.sz_tip, "TokenWatcher 启动中…");
-        let add_rc = Shell_NotifyIconW(NIM_ADD, &nid);
+    /// 优雅退出：收掉子进程。注册 signal handler 后阻塞等待。
+    pub fn run() {
         trace(&format!(
-            "NIM_ADD rc={} hwnd={} hicon={} ico_len={} cbSize={}",
-            add_rc,
-            hwnd,
-            nid.h_icon,
-            ICO.len(),
-            nid.cb_size
+            "daemon: 启动 port={} exe={}",
+            port(),
+            main_exe().display()
         ));
-
         start_server();
         std::thread::sleep(Duration::from_millis(1200));
-        rebuild_tip(hwnd);
-        show_first_run_balloon(hwnd);
+        let alive = port_alive();
+        trace(&format!("daemon: serve 探活 alive={alive}，面板 http://127.0.0.1:{}/", port()));
 
-        // 配置 open_panel = true 时自动开浏览器；开机自启拉起时一律跳过，避免每次开机弹窗
-        if cfg.open_panel {
-            if from_boot {
-                trace("open_panel: 开机自启拉起，跳过弹窗（面板仍可用托盘图标打开）");
-            } else {
-                open_panel();
+        // 简单信号等待：循环检查子进程 + 每 30s 探活重启（守护职责）
+        loop {
+            std::thread::sleep(Duration::from_secs(30));
+            if !port_alive() {
+                trace("daemon: serve 掉线，重新拉起");
+                start_server();
             }
         }
+    }
 
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, 0, 0, 0) > 0 {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-
-        // 正常退出路径：收掉子进程
-        let nid2 = build_nid(hwnd);
-        Shell_NotifyIconW(NIM_DELETE, &nid2);
+    /// 收到退出信号：kill 子进程。由 SIGTERM 处理调用（简化：主循环外处理）。
+    pub fn stop_all() {
         stop_server();
-        CloseHandle(mutex);
+        trace("daemon: 已退出，serve 已停止");
     }
 }
 

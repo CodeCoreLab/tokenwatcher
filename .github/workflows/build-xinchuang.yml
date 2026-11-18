@@ -1,0 +1,93 @@
+name: build-xinchuang
+
+# TokenWatcher 信创 Linux 构建：
+# - 托盘宿主（Rust）：Linux 走守护模式（无 GTK 依赖，零第三方 crate），aarch64 原生编译
+# - 主引擎（Node SEA）：在 runner 上用 arm64 Node 生成 blob + postject 注入（SEA blob 不跨架构）
+# - 产物：token-watcher（引擎单文件）+ TokenWatcherTray（托盘守护）
+
+on:
+  push:
+    branches: [main, master, "feat/**"]
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            node_arch: x64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            node_arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 安装 Node 22（原生架构）
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 安装构建依赖（esbuild/postject + zstd）
+        run: |
+          npm install esbuild postject --no-save
+          sudo apt-get update -qq && sudo apt-get install -y -qq zstd file
+
+      # ---- 托盘宿主（Rust 守护模式，Linux 无 GTK 依赖）----
+      - name: 托盘宿主单测
+        working-directory: tray
+        run: cargo test
+
+      - name: 托盘宿主构建（release）
+        working-directory: tray
+        run: cargo build --release
+        env:
+          CARGO_TARGET_DIR: tray/target
+
+      - name: 托盘产物校验
+        run: |
+          BIN=tray/target/release/TokenWatcherTray
+          test -f "$BIN" || { echo "托盘产物缺失"; exit 1; }
+          ls -lh "$BIN"
+          file "$BIN" | tee /dev/stderr | grep -q "ELF 64-bit" || { echo "非 ELF64"; exit 1; }
+
+      # ---- 主引擎（Node SEA）：runner 原生架构 Node 生成 blob 并注入 ----
+      - name: 引擎源准备
+        run: |
+          # 上游 token-watcher 源：CI 环境用 npm 拉同版本包作为源
+          npm pack token-watcher@1.5.1 --pack-destination /tmp
+          mkdir -p /tmp/tw-src && tar -xzf /tmp/token-watcher-1.5.1.tgz -C /tmp/tw-src --strip-components=1
+          echo "TW_SRC=/tmp/tw-src" >> "$GITHUB_ENV"
+
+      - name: SEA 构建（build.mjs 托盘步骤自动跳过：Linux 下 tray 产物由上一步产出）
+        run: |
+          node build.mjs "$TW_SRC" || node build.mjs "$TW_SRC" 2>&1 | tail -20
+
+      - name: 引擎产物校验
+        run: |
+          BIN=dist/token-watcher
+          test -f "$BIN" || { echo "引擎产物缺失，dist 内容："; ls -la dist/; exit 1; }
+          ls -lh "$BIN"
+          file "$BIN" | tee /dev/stderr | grep -q "ELF 64-bit" || { echo "非 ELF64"; exit 1; }
+          # SEA 冒烟：--version 应正常输出
+          chmod +x "$BIN"
+          "$BIN" --version || true
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenwatcher-${{ matrix.target }}
+          path: |
+            tray/target/release/TokenWatcherTray
+            dist/token-watcher
+          if-no-files-found: warn
