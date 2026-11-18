@@ -65,6 +65,8 @@ jobs:
           # 上游 token-watcher 源：CI 环境用 npm 拉同版本包作为源
           npm pack token-watcher@1.5.1 --pack-destination /tmp
           mkdir -p /tmp/tw-src && tar -xzf /tmp/token-watcher-1.5.1.tgz -C /tmp/tw-src --strip-components=1
+          # npm 包不含 echarts（build.mjs 会内嵌它）：补装到源目录
+          npm install echarts@5 --prefix /tmp/tw-src --no-save
           echo "TW_SRC=/tmp/tw-src" >> "$GITHUB_ENV"
 
       - name: SEA 构建（build.mjs 托盘步骤自动跳过：Linux 下 tray 产物由上一步产出）
