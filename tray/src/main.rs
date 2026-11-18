@@ -31,6 +31,11 @@ use std::time::Duration;
 
 #[cfg(windows)]
 mod win {
+    pub use super::win_types::*;
+}
+
+#[cfg(windows)]
+mod win_types {
     pub type HWND = isize;
     pub type HINSTANCE = isize;
     pub type HANDLE = isize;
@@ -39,67 +44,66 @@ mod win {
     pub type HKEY = isize;
     pub type LRESULT = isize;
     pub type WNDPROC = unsafe extern "system" fn(HWND, u32, usize, isize) -> LRESULT;
-}
-#[cfg(windows)]
-use win::*;
 
-#[repr(C)]
-struct POINT {
-    x: i32,
-    y: i32,
-}
+    #[repr(C)]
+    pub struct POINT {
+        pub x: i32,
+        pub y: i32,
+    }
 
-#[repr(C)]
-struct MSG {
-    hwnd: HWND,
-    message: u32,
-    w_param: usize,
-    l_param: isize,
-    time: u32,
-    pt: POINT,
-}
+    #[repr(C)]
+    pub struct MSG {
+        pub hwnd: HWND,
+        pub message: u32,
+        pub w_param: usize,
+        pub l_param: isize,
+        pub time: u32,
+        pub pt: POINT,
+    }
 
-#[repr(C)]
-struct WNDCLASSW {
-    style: u32,
-    lpfn_wnd_proc: Option<WNDPROC>,
-    cb_cls_extra: i32,
-    cb_wnd_extra: i32,
-    h_instance: HINSTANCE,
-    h_icon: HICON,
-    h_cursor: HANDLE,
-    hbr_background: HANDLE,
-    lpsz_menu_name: *const u16,
-    lpsz_class_name: *const u16,
-}
+    #[repr(C)]
+    pub struct WNDCLASSW {
+        pub style: u32,
+        pub lpfn_wnd_proc: Option<WNDPROC>,
+        pub cb_cls_extra: i32,
+        pub cb_wnd_extra: i32,
+        pub h_instance: HINSTANCE,
+        pub h_icon: HICON,
+        pub h_cursor: HANDLE,
+        pub hbr_background: HANDLE,
+        pub lpsz_menu_name: *const u16,
+        pub lpsz_class_name: *const u16,
+    }
 
-#[repr(C)]
-struct GUID {
-    d1: u32,
-    d2: u16,
-    d3: u16,
-    d4: [u8; 8],
-}
+    #[repr(C)]
+    pub struct GUID {
+        pub d1: u32,
+        pub d2: u16,
+        pub d3: u16,
+        pub d4: [u8; 8],
+    }
 
-/// NOTIFYICONDATAW（Vista+ 完整版）。cbSize 用 size_of 自适应，避免版本差异踩坑。
-#[repr(C)]
-struct NOTIFYICONDATAW {
-    cb_size: u32,
-    hwnd: HWND,
-    uid: u32,
-    u_flags: u32,
-    u_callback_message: u32,
-    h_icon: HICON,
-    sz_tip: [u16; 128],
-    dw_state: u32,
-    dw_state_mask: u32,
-    sz_info: [u16; 256],
-    u_version: u32,
-    sz_info_title: [u16; 64],
-    dw_info_flags: u32,
-    guid_item: GUID,
-    h_balloon_icon: HICON,
+    /// NOTIFYICONDATAW（Vista+ 完整版）。cbSize 用 size_of 自适应，避免版本差异踩坑。
+    #[repr(C)]
+    pub struct NOTIFYICONDATAW {
+        pub cb_size: u32,
+        pub hwnd: HWND,
+        pub uid: u32,
+        pub u_flags: u32,
+        pub u_callback_message: u32,
+        pub h_icon: HICON,
+        pub sz_tip: [u16; 128],
+        pub dw_state: u32,
+        pub dw_state_mask: u32,
+        pub sz_info: [u16; 256],
+        pub u_version: u32,
+        pub sz_info_title: [u16; 64],
+        pub dw_info_flags: u32,
+        pub guid_item: GUID,
+        pub h_balloon_icon: HICON,
+    }
 }
+use win_types::*;
 
 /* ------------------------------------------------------------------ 常量 */
 
